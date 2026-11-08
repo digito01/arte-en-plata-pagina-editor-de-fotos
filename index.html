@@ -406,8 +406,9 @@ function classifyWords(words, o) {
       if (/^P[MNH][.:\-]?$/.test(t)) { const f = follow(w, { test: s => ND.test(s) && hasDigit(s) }); if (f) { push([w, f.b], [i, f.j], 'pm'); return; } }
     }
     if (o.price) {
-      if (/^(antes|ahora)[:;.]?(L\.?|Lps\.?|\$)?\d[\d.,]*$/i.test(t)) { push([w], [i], 'price'); return; }
-      if (/^(antes|ahora)[:;.]?$/i.test(t)) { const f = follow(w, NUM); if (f) push([w, f.b], [i, f.j], 'price'); else push([w], [i], 'price'); return; }
+      if (/^(antes|ahora|ant|aho|ahor)[:;.]?(L\.?|Lps\.?|\$)?\d[\d.,]*$/i.test(t)) { push([w], [i], 'price'); return; }
+      if (/^[:;]\d{2,5}$/.test(t)) { push([w], [i], 'price'); return; }
+      if (/^(antes|ahora|ante|ant|aho|ahor|ah)[:;.]?$/i.test(t)) { const f = follow(w, NUM); if (f) push([w, f.b], [i, f.j], 'price'); else push([w], [i], 'price'); return; }
     }
     if (o.date && /^\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}$/.test(t)) { push([w], [i], 'date'); return; }
     if (o.code && /^[A-Z]{2,5}(?:-[A-Z0-9]{1,5}){2,}$/.test(t) && /\d/.test(t)) { push([w], [i], 'code'); return; }
@@ -487,16 +488,21 @@ function findBanner(d, w, h, r, cbg, others) {
   return R;
 }
 function textMask(d, w, h, r, cbg) {
-  const T = 40, pad = 2, m = new Uint8Array(w * h); let cnt = 0, tot = 0;
-  const rh = r.y1 - r.y0;
-  for (let y = Math.max(0, r.y0 - pad); y < Math.min(h, r.y1 + pad); y++)
-    for (let x = Math.max(0, r.x0 - pad); x < Math.min(w, r.x1 + pad); x++) {
-      tot++; const i = (y * w + x) * 4;
-      if (Math.hypot(d[i] - cbg[0], d[i + 1] - cbg[1], d[i + 2] - cbg[2]) > T) { m[y * w + x] = 1; cnt++; }
-    }
-  const frac = cnt / Math.max(1, tot);
-  if (frac < 0.04 || frac > 0.65) return rectMask(w, h, r, 3);
-  return dilate(m, w, h, Math.max(2, Math.round(rh * 0.14)));
+  const pad = 2, rh = r.y1 - r.y0;
+  const x0 = Math.max(0, r.x0 - pad), x1 = Math.min(w, r.x1 + pad), y0 = Math.max(0, r.y0 - pad), y1 = Math.min(h, r.y1 + pad);
+  const L = new Float32Array(Math.max(0, (x1 - x0) * (y1 - y0))); let k = 0;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * w + x) * 4; L[k++] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; }
+  if (!L.length) return rectMask(w, h, r, 3);
+  const s = Float32Array.from(L).sort(), p5 = s[Math.floor(s.length * 0.05)], p95 = s[Math.floor(s.length * 0.95)];
+  const ring = 0.299 * cbg[0] + 0.587 * cbg[1] + 0.114 * cbg[2], dark = ring - p5, light = p95 - ring;
+  let mode = null, thr = 0;
+  if (dark >= light && dark > 35) { mode = 'd'; thr = p5 + 0.6 * dark; }
+  else if (light > 35) { mode = 'l'; thr = p95 - 0.6 * light; }
+  if (!mode) return rectMask(w, h, r, 3);
+  const m = new Uint8Array(w * h); let cnt = 0; k = 0;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const v = L[k++]; if (mode === 'd' ? v < thr : v > thr) { m[y * w + x] = 1; cnt++; } }
+  if (cnt / L.length > 0.6 || cnt < 8) return rectMask(w, h, r, 3);
+  return dilate(m, w, h, Math.max(2, Math.round(rh * 0.12)));
 }
 
 function pushPull(vals, known, w, h, C, holes) {
@@ -700,17 +706,20 @@ function eraseTargets(ctx, W, H, targets, others, opt) {
 }
 
 /* ================= OCR ================= */
-let tessWorker = null, tessLoading = null, ocrChain = Promise.resolve();
-async function ensureOCR() {
-  if (tessWorker) return tessWorker;
-  if (!tessLoading) tessLoading = (async () => {
+const OCR_MAX = (navigator.hardwareConcurrency || 2) >= 4 ? 2 : 1;
+const tessWorkers = []; let tessLibP = null; const ocrQueue = []; let ocrActive = 0;
+async function ensureOCR(slot) {
+  if (!tessLibP) tessLibP = (async () => {
     setOcr('Cargando lector de texto (solo la primera vez)…');
     if (!window.Tesseract) { try { await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'); } catch (e) { await loadScript('https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js'); } }
+  })().catch(e => { tessLibP = null; throw e; });
+  await tessLibP;
+  if (!tessWorkers[slot]) tessWorkers[slot] = (async () => {
     const w = await Tesseract.createWorker('eng');
     await w.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1' });
-    tessWorker = w; return w;
-  })().catch(e => { tessLoading = null; throw e; });
-  return tessLoading;
+    return w;
+  })().catch(e => { tessWorkers[slot] = null; throw e; });
+  return tessWorkers[slot];
 }
 function wordsFrom(data, k) {
   let ws = data.words;
@@ -719,32 +728,47 @@ function wordsFrom(data, k) {
     text: w.text, conf: w.confidence, x0: w.bbox.x0 / k, y0: w.bbox.y0 / k, x1: w.bbox.x1 / k, y1: w.bbox.y1 / k
   }));
 }
-async function ocrImage(it) {
+function variant(src, mode) { // texto oscuro/claro aislado del fondo (blanco y negro)
+  const c = mkCanvas(src.width, src.height), cx = c.getContext('2d', { willReadFrequently: true });
+  cx.drawImage(src, 0, 0); const id = cx.getImageData(0, 0, c.width, c.height), p = id.data;
+  for (let i = 0; i < p.length; i += 4) {
+    const l = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2], on = mode === 'dark' ? l < 120 : l > 180, v = on ? 0 : 255;
+    p[i] = p[i + 1] = p[i + 2] = v;
+  }
+  cx.putImageData(id, 0, 0); return c;
+}
+async function ocrImage(it, slot) {
   if (window.__mockOCR) return window.__mockOCR(it);
   const img = await loadImg(it.url), W = img.naturalWidth, H = img.naturalHeight;
-  const k = clamp(1800 / Math.max(W, H), 0.3, 2.5);
-  const c = mkCanvas(Math.round(W * k), Math.round(H * k)), cx = c.getContext('2d', { willReadFrequently: true });
-  cx.drawImage(img, 0, 0, c.width, c.height);
-  const worker = await ensureOCR();
+  const k = clamp(1500 / Math.max(W, H), 0.3, 2.5);
+  const c = mkCanvas(Math.round(W * k), Math.round(H * k)); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const worker = await ensureOCR(slot);
   let words = wordsFrom((await worker.recognize(c)).data, k);
-  if (!classifyWords(words, { pm: true, price: true }).length) {
-    const id = cx.getImageData(0, 0, c.width, c.height), p = id.data;
-    for (let i = 0; i < p.length; i += 4) { p[i] = 255 - p[i]; p[i + 1] = 255 - p[i + 1]; p[i + 2] = 255 - p[i + 2]; }
-    cx.putImageData(id, 0, 0);
-    words = words.concat(wordsFrom((await worker.recognize(c)).data, k));
+  const found = () => classifyWords(words, { pm: true, price: true }).length > 0;
+  for (const mode of ['dark', 'light']) {
+    if (found()) break;
+    words = words.concat(wordsFrom((await worker.recognize(variant(c, mode))).data, k));
   }
   return words;
 }
-function runOCR(it) {
-  if (it.ocrP) return it.ocrP;
+function runOCR(it, prio) {
+  if (it.ocrP) { if (prio) { const i = ocrQueue.indexOf(it); if (i > 0) { ocrQueue.splice(i, 1); ocrQueue.unshift(it); } } return it.ocrP; }
   it.ocrStatus = 'running'; updateTile(it);
-  it.ocrP = (ocrChain = ocrChain.then(async () => {
-    try { if (it.loadError) throw new Error('No se pudo leer la imagen'); it.words = await ocrImage(it); it.ocrStatus = 'done'; }
-    catch (e) { console.warn('OCR', (e && e.message) || e); it.ocrStatus = 'error'; it.words = []; if (/leer la imagen/.test((e && e.message) || '')) it.loadError = true; ocrError(e); }
-    it.ver++; updateTile(it); ocrSummary();
-    if (items[refIdx] === it) redrawStage();
-  }));
+  it.ocrP = new Promise(res => { it._res = res; if (prio) ocrQueue.unshift(it); else ocrQueue.push(it); pumpOCR(); });
   return it.ocrP;
+}
+function pumpOCR() {
+  while (ocrActive < OCR_MAX && ocrQueue.length) {
+    const it = ocrQueue.shift(), slot = ocrActive; ocrActive++;
+    (async () => {
+      try { if (it.loadError) throw new Error('No se pudo leer la imagen'); it.words = await ocrImage(it, slot); it.ocrStatus = 'done'; }
+      catch (e) { console.warn('OCR', (e && e.message) || e); it.ocrStatus = 'error'; it.words = []; if (/leer la imagen/.test((e && e.message) || '')) it.loadError = true; ocrError(e); }
+      it.ver++; updateTile(it); ocrSummary();
+      if (items[refIdx] === it) redrawStage();
+      if (items[cur] === it) { updateModalUI(true); mEditor.redraw(); schedulePreview(); }
+      ocrActive--; it._res(); pumpOCR();
+    })();
+  }
 }
 let ocrErrShown = false, lastOcrErr = '';
 function ocrError(e) { lastOcrErr = (e && e.message) || String(e); if (ocrErrShown) return; ocrErrShown = true; const img = e && /leer la imagen/.test(e.message || ''); toast(img ? 'No se pudieron abrir algunas fotos (formato no compatible, ej. HEIC). Conviértelas a JPG o PNG.' : 'No se pudo iniciar el lector de texto (' + lastOcrErr + '). Revisa tu internet o abre la página desde un hosting https (ej. GitHub Pages). “Borrar área” y el recorte siguen funcionando.', 9000); }
@@ -1052,7 +1076,7 @@ async function addFiles(fileList) {
     try { const img = await loadImg(it.url); it.w = img.naturalWidth; it.h = img.naturalHeight; const k = 240 / Math.max(it.w, it.h), c = mkCanvas(Math.round(it.w * Math.min(1, k)), Math.round(it.h * Math.min(1, k))); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); it.thumbUrl = c.toDataURL('image/jpeg', .8); } catch (e) { it.loadError = true; ocrErrShown || ocrError(new Error('leer la imagen')); }
     updateTile(it);
   }
-  if (G.clean.enabled) items.forEach(it => { if (items.includes(it)) runOCR(it); });
+  if (G.clean.enabled) { const first = items[refIdx]; if (first) runOCR(first, true); items.forEach(it => { if (items.includes(it)) runOCR(it); }); }
 }
 function disposeItem(it) { fileByUrl.delete(it.url); }
 function removeItem(id) {
@@ -1067,7 +1091,7 @@ const drop = $('#drop');
 ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
 $('#clearBtn').addEventListener('click', () => { items.forEach(disposeItem); items = []; renderGrid(); setStageItem(); });
-$('#refSelect').addEventListener('change', e => { refIdx = +e.target.value; setStageItem(); });
+$('#refSelect').addEventListener('change', e => { refIdx = +e.target.value; setStageItem(); if (G.clean.enabled && items[refIdx]) runOCR(items[refIdx], true); });
 
 /* Limpieza */
 function syncClean() {
@@ -1188,7 +1212,7 @@ function commit(it) { if (it) finalize(it); }
 function loadModalItem() {
   const it = items[cur]; mEditor.tool = 'move'; setTool('move');
   mEditor.set(it, itemAd(it)); updateModalUI(true); schedulePreview();
-  if (G.clean.enabled && it.ocrStatus !== 'done') runOCR(it).then(() => { if (items[cur] === it) { updateModalUI(true); mEditor.redraw(); schedulePreview(); } });
+  if (G.clean.enabled && it.ocrStatus !== 'done') runOCR(it, true);
 }
 function updateModalUI(full) {
   const it = items[cur]; if (!it) return; const e = eff(it);
