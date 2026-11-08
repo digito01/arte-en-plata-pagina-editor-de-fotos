@@ -201,8 +201,8 @@ dialog li{margin:6px 0}
     <section class="card" aria-labelledby="t3">
       <div class="card-h"><span class="step">3</span><h2 id="t3">Logo</h2></div>
       <div class="logos" id="logos" role="group" aria-label="Elegir logo"></div>
-      <div class="range"><span>Tamaño</span><input type="range" id="logoScale" min="10" max="60" step="1"><output id="logoScaleOut">30%</output></div>
-      <p class="hint">Arrástralo sobre la foto para ubicarlo.</p>
+      <div class="range"><span>Tamaño</span><input type="range" id="logoScale" min="6" max="70" step="1"><output id="logoScaleOut">30%</output></div>
+      <p class="hint">Arrástralo sobre la foto para ubicarlo; el punto dorado de la esquina cambia su tamaño.</p>
       <input type="file" id="logoFile" accept="image/png,image/jpeg,image/svg+xml" hidden>
     </section>
 
@@ -275,6 +275,7 @@ dialog li{margin:6px 0}
       <div class="num"><label for="mTop">Superior (px)</label><div class="stepper"><button type="button" data-step="-1" data-for="mTop" aria-label="Menos">−</button><input id="mTop" type="number" inputmode="numeric" min="0"><button type="button" data-step="1" data-for="mTop" aria-label="Más">+</button></div></div>
       <div class="num"><label for="mBottom">Inferior (px)</label><div class="stepper"><button type="button" data-step="-1" data-for="mBottom" aria-label="Menos">−</button><input id="mBottom" type="number" inputmode="numeric" min="0"><button type="button" data-step="1" data-for="mBottom" aria-label="Más">+</button></div></div>
       <label class="switch"><input type="checkbox" id="mLogoOn"><span>Logo</span></label>
+      <div class="num"><label for="mLogoScale">Tamaño logo <output id="mLogoScaleOut"></output></label><input type="range" id="mLogoScale" min="6" max="70" style="accent-color:var(--gold);min-height:44px;width:100%"></div>
       <button class="ghost" id="mReset" type="button">Restablecer foto</button>
     </div>
     <div class="m-targets" id="mTargets" aria-live="polite"></div>
@@ -399,8 +400,10 @@ function classifyWords(words, o) {
     if (used.has(i)) return;
     const t = (w.text || '').trim(); if (!t) return;
     if (o.pm) {
-      if (/^P[MN][.:\-]?\d{1,4}$/.test(t)) { push([w], [i], 'pm'); return; }
-      if (/^P[MN][.:\-]?$/.test(t)) { const f = follow(w, /^\d{1,4}$/); if (f) { push([w, f.b], [i, f.j], 'pm'); return; } }
+      const ND = /^[\dOolISB][\dOolISB.,]{0,8}$/, hasDigit = s => /\d/.test(s);
+      const m1 = t.match(/^P[MNH][.:\-]?([\dOolISB][\dOolISB.,]{0,8})$/);
+      if (m1 && hasDigit(m1[1])) { push([w], [i], 'pm'); return; }
+      if (/^P[MNH][.:\-]?$/.test(t)) { const f = follow(w, { test: s => ND.test(s) && hasDigit(s) }); if (f) { push([w, f.b], [i, f.j], 'pm'); return; } }
     }
     if (o.price) {
       if (/^(antes|ahora)[:;.]?(L\.?|Lps\.?|\$)?\d[\d.,]*$/i.test(t)) { push([w], [i], 'price'); return; }
@@ -857,7 +860,7 @@ class Editor {
     if (this.draft) { const q = this.draft; ctx.fillStyle = 'rgba(224,138,0,.25)'; ctx.strokeStyle = '#e08a00'; ctx.setLineDash([5, 3]); ctx.fillRect(q.x, q.y, q.w, q.h); ctx.strokeRect(q.x, q.y, q.w, q.h); ctx.setLineDash([]); }
     // Logo
     const lr = this.logoRect();
-    if (lr) { ctx.drawImage(G.logoImg, lr.x, lr.y, lr.w, lr.h); ctx.strokeStyle = 'rgba(184,138,43,.95)'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.strokeRect(lr.x - 1, lr.y - 1, lr.w + 2, lr.h + 2); ctx.setLineDash([]); }
+    if (lr) { ctx.drawImage(G.logoImg, lr.x, lr.y, lr.w, lr.h); ctx.strokeStyle = 'rgba(184,138,43,.95)'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.strokeRect(lr.x - 1, lr.y - 1, lr.w + 2, lr.h + 2); ctx.setLineDash([]); ctx.fillStyle = '#f3c24d'; ctx.strokeStyle = '#1c1c1f'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(lr.x + lr.w, lr.y + lr.h, 8, 0, 7); ctx.fill(); ctx.stroke(); }
     // Líneas de corte
     const line = (y, val, below) => {
       ctx.strokeStyle = '#f3c24d'; ctx.lineWidth = 2; ctx.setLineDash([8, 5]); ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cssW, y); ctx.stroke(); ctx.setLineDash([]);
@@ -874,6 +877,7 @@ class Editor {
     if (!this.img) return null;
     if (this.tool === 'erase') return { kind: 'erase' };
     const lr = this.logoRect();
+    if (lr && Math.abs(p.x - (lr.x + lr.w)) <= 14 && Math.abs(p.y - (lr.y + lr.h)) <= 14) return { kind: 'logoSize', lr };
     if (lr && p.x >= lr.x && p.x <= lr.x + lr.w && p.y >= lr.y && p.y <= lr.y + lr.h) return { kind: 'logo', lr };
     const { tY, bY } = this.geo(), inP = (q) => q && p.x >= q.x && p.x <= q.x + q.w && p.y >= q.y && p.y <= q.y + q.h;
     if (inP(this.pillT) || Math.abs(p.y - tY) <= 12) return { kind: 'top' };
@@ -893,7 +897,7 @@ class Editor {
   }
   move(e) {
     const p = this.pos(e), dr = this.drag;
-    if (!dr) { const h = this.hit(p); this.cv.style.cursor = !h ? 'default' : h.kind === 'erase' ? 'crosshair' : h.kind === 'logo' ? 'grab' : h.kind === 'target' ? 'pointer' : 'ns-resize'; return; }
+    if (!dr) { const h = this.hit(p); this.cv.style.cursor = !h ? 'default' : h.kind === 'erase' ? 'crosshair' : h.kind === 'logo' ? 'grab' : h.kind === 'logoSize' ? 'nwse-resize' : h.kind === 'target' ? 'pointer' : 'ns-resize'; return; }
     if (Math.hypot(p.x - dr.start.x, p.y - dr.start.y) > 3) dr.moved = true;
     const k = this.k(), d = this.d, H = this.it.h;
     if (dr.kind === 'top' || dr.kind === 'bottom') {
@@ -906,6 +910,10 @@ class Editor {
       const x = clamp((p.x - dr.off.x) / cssW, 0, Math.max(0, 1 - lg.scale));
       const y = clamp((p.y - dr.off.y - tY) / lr.kh, 0, Math.max(0, 1 - lr.h / lr.kh));
       this.ad.setLogoPos(x, y); this.onChange('logo');
+    } else if (dr.kind === 'logoSize') {
+      const { tY, bY, cssW } = this.geo(), kh = bY - tY, lr = this.logoRect(), lg = this.ad.logo(), asp = G.logoImg.naturalHeight / G.logoImg.naturalWidth;
+      const maxS = Math.min(1 - lg.x, (kh * (1 - lg.y)) / (cssW * asp));
+      this.ad.setLogoScale(clamp((p.x - lr.x) / cssW, 0.06, Math.max(0.06, maxS))); this.onChange('logo');
     } else if (dr.kind === 'erase') {
       const s = dr.start; this.draft = { x: Math.min(s.x, p.x), y: Math.min(s.y, p.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y) };
     }
@@ -918,7 +926,7 @@ class Editor {
       const q = this.draft, d = this.d; this.draft = null;
       if (q.w > 6 && q.h > 6) { this.ad.addManual({ x0: q.x / d, y0: q.y / d, x1: (q.x + q.w) / d, y1: (q.y + q.h) / d }); this.onChange('targets'); }
     } else if (dr.kind === 'target' && !dr.moved) { this.ad.toggleTarget(dr.t.key); this.onChange('targets'); }
-    else this.onChange(dr.kind === 'logo' ? 'logo-end' : 'crop-end');
+    else this.onChange(dr.kind === 'logo' || dr.kind === 'logoSize' ? 'logo-end' : 'crop-end');
     this.redraw();
   }
 }
@@ -929,6 +937,7 @@ const globalAd = it => ({
   setCrop: (t, b) => { G.top = t; G.bottom = b; $('#gTop').value = t; $('#gBottom').value = b; },
   logo: () => G.logo,
   setLogoPos: (x, y) => { G.logo.x = x; G.logo.y = y; },
+  setLogoScale: s => { G.logo.scale = s; $('#logoScale').value = Math.round(s * 100); $('#logoScaleOut').textContent = Math.round(s * 100) + '%'; },
   targets: () => getTargets(it),
   toggleTarget: key => { if (it.off.has(key)) it.off.delete(key); else it.off.add(key); it.ver++; },
   addManual: r => { const c = v => clamp(v, 0, 1); G.areas.push({ x0: c(r.x0 / it.w), y0: c(r.y0 / it.h), x1: c(r.x1 / it.w), y1: c(r.y1 / it.h) }); }
@@ -938,6 +947,7 @@ const itemAd = it => ({
   setCrop: (t, b) => { it.top = t; it.bottom = b; it.custom = true; it.ver++; $('#mTop').value = Math.round(t); $('#mBottom').value = Math.round(b); },
   logo: () => it.logo || G.logo,
   setLogoPos: (x, y) => { if (!it.logo) it.logo = { ...G.logo }; it.logo.x = x; it.logo.y = y; it.custom = true; it.ver++; },
+  setLogoScale: s => { if (!it.logo) it.logo = { ...G.logo }; it.logo.scale = s; it.custom = true; it.ver++; },
   targets: () => getTargets(it),
   toggleTarget: key => { if (it.off.has(key)) it.off.delete(key); else it.off.add(key); it.custom = true; it.ver++; },
   addManual: r => { it.manual.push(r); it.custom = true; it.ver++; }
@@ -1187,6 +1197,7 @@ function updateModalUI(full) {
   $('#mPrev').disabled = cur === 0; $('#mNext').innerHTML = cur === items.length - 1 ? 'Terminar<kbd class="hide-sm">Enter</kbd>' : 'Siguiente →<kbd class="hide-sm">Enter</kbd>';
   if (document.activeElement !== $('#mTop')) $('#mTop').value = Math.round(e.top);
   if (document.activeElement !== $('#mBottom')) $('#mBottom').value = Math.round(e.bottom);
+  $('#mLogoScale').value = Math.round(e.logo.scale * 100); $('#mLogoScaleOut').textContent = Math.round(e.logo.scale * 100) + '%'; $('#mLogoScale').disabled = !G.logoImg;
   $('#mLogoOn').checked = e.logo.on && !!G.logoImg; $('#mLogoOn').disabled = !G.logoImg;
   if (full) {
     const box = $('#mTargets'); box.innerHTML = '';
@@ -1227,6 +1238,7 @@ function nav(dir) {
   const it = items[cur]; if (!it) return; it.top = readCrop('#mTop'); it.bottom = readCrop('#mBottom'); it.custom = true; it.ver++;
   mEditor.redraw(); schedulePreview(); updateModalUI(false);
 }));
+$('#mLogoScale').addEventListener('input', e => { const it = items[cur]; if (!it.logo) it.logo = { ...G.logo }; it.logo.scale = +e.target.value / 100; it.logo.x = Math.min(it.logo.x, Math.max(0, 1 - it.logo.scale)); it.custom = true; it.ver++; $('#mLogoScaleOut').textContent = e.target.value + '%'; mEditor.redraw(); schedulePreview(); });
 $('#mLogoOn').addEventListener('change', e => { const it = items[cur]; if (!it.logo) it.logo = { ...G.logo }; it.logo.on = e.target.checked; it.custom = true; it.ver++; mEditor.redraw(); schedulePreview(); });
 $('#mReset').addEventListener('click', () => { const it = items[cur]; it.top = it.bottom = null; it.logo = null; it.manual = []; it.off = new Set(); it.custom = false; it.ver++; $('#mTop').value = G.top; $('#mBottom').value = G.bottom; updateModalUI(true); mEditor.redraw(); schedulePreview(); toast('Foto restablecida'); });
 $('#mPrev').onclick = () => nav(-1); $('#mNext').onclick = () => nav(1); $('#mClose').onclick = closeModal;
