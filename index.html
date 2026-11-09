@@ -187,6 +187,9 @@ dialog li{margin:6px 0}
           <label class="chip"><input type="checkbox" id="cDate"><span>Fechas</span></label>
           <label class="chip"><input type="checkbox" id="cCode"><span>Códigos (ABC-12-3A)</span></label>
         </div>
+        <label class="switch" style="margin:2px 0 6px"><input type="checkbox" id="learnOn"><span>Completar por posición repetida <small style="color:var(--muted)">(si el texto se repite en el mismo sitio en otras fotos)</small></span></label>
+        <label class="field"><span>Lectura del texto</span>
+          <select id="ocrMode"><option value="fast">Rápida (1 pasada)</option><option value="balanced">Equilibrada (recomendada)</option><option value="full">Exhaustiva (más lenta)</option></select></label>
         <label class="field"><span>Otras palabras a borrar <small style="font-weight:400;color:var(--muted)">(separadas por coma)</small></span>
           <input type="text" id="cExtra" placeholder="Ej: mayorista, oferta" autocomplete="off"></label>
         <label class="field"><span>Si el fondo es muy complicado</span>
@@ -356,6 +359,7 @@ const G = {
   logo: Object.assign({ id: 'logo1', src: null, on: true, scale: 0.3, x: 0.68, y: 0.05 }, saved.logo || {}),
   clean: Object.assign({ enabled: true, pm: true, price: true, date: false, code: false, extra: '' }, saved.clean || {}),
   areas: saved.areas || [],
+  learn: saved.learn !== false, ocrMode: saved.ocrMode || 'balanced',
   fallback: saved.fallback || 'logo',
   maxDim: saved.maxDim || 0,
   ver: 0, logoImg: null
@@ -367,7 +371,7 @@ const refW = () => (items[0] && items[0].w) || 1000;
 
 function persist() {
   store.set('ef.settings', {
-    top: G.top, bottom: G.bottom, areas: G.areas, fallback: G.fallback, maxDim: G.maxDim, clean: G.clean,
+    top: G.top, bottom: G.bottom, areas: G.areas, learn: G.learn, ocrMode: G.ocrMode, fallback: G.fallback, maxDim: G.maxDim, clean: G.clean,
     logo: { id: G.logo.id, on: G.logo.on, scale: G.logo.scale, x: G.logo.x, y: G.logo.y, src: G.logo.id === 'custom' && G.logo.src && G.logo.src.length < 400000 ? G.logo.src : null }
   });
 }
@@ -487,7 +491,7 @@ function findBanner(d, w, h, r, cbg, others) {
   }
   return R;
 }
-function textMask(d, w, h, r, cbg) {
+function textMask(d, w, h, r, cbg, strict) {
   const pad = 2, rh = r.y1 - r.y0;
   const x0 = Math.max(0, r.x0 - pad), x1 = Math.min(w, r.x1 + pad), y0 = Math.max(0, r.y0 - pad), y1 = Math.min(h, r.y1 + pad);
   const L = new Float32Array(Math.max(0, (x1 - x0) * (y1 - y0))); let k = 0;
@@ -498,9 +502,10 @@ function textMask(d, w, h, r, cbg) {
   let mode = null, thr = 0;
   if (dark >= light && dark > 35) { mode = 'd'; thr = p5 + 0.6 * dark; }
   else if (light > 35) { mode = 'l'; thr = p95 - 0.6 * light; }
-  if (!mode) return rectMask(w, h, r, 3);
+  if (!mode) return strict ? null : rectMask(w, h, r, 3);
   const m = new Uint8Array(w * h); let cnt = 0; k = 0;
   for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const v = L[k++]; if (mode === 'd' ? v < thr : v > thr) { m[y * w + x] = 1; cnt++; } }
+  if (strict && (cnt < 15 || cnt / L.length > 0.45)) return null;
   if (cnt / L.length > 0.6 || cnt < 8) return rectMask(w, h, r, 3);
   return dilate(m, w, h, Math.max(2, Math.round(rh * 0.12)));
 }
@@ -644,7 +649,7 @@ function inpaint(d, w, h, mask, forbid, o) {
 }
 
 function mergeClusters(ts) {
-  const auto = ts.filter(t => !t.manual).map(t => ({ ...t })), man = ts.filter(t => t.manual).map(t => ({ ...t }));
+  const auto = ts.filter(t => !t.manual && !t.learned).map(t => ({ ...t })), man = ts.filter(t => t.manual || t.learned).map(t => ({ ...t }));
   let changed = true;
   while (changed) {
     changed = false;
@@ -674,7 +679,8 @@ function eraseOne(ctx, W, H, t, idx, list, others, opt) {
   else {
     const cbg = ringMedian(d, w, h, r, Math.max(3, Math.round(rh * 0.1)));
     const b = findBanner(d, w, h, r, cbg, oth);
-    mask = b ? dilate(b, w, h, 3) : textMask(d, w, h, r, cbg);
+    mask = b ? dilate(b, w, h, 3) : textMask(d, w, h, r, cbg, !!t.learned);
+    if (!mask) return { complex: false, skipped: true };
   }
   const forbid = new Uint8Array(w * h);
   list.forEach((o, j) => { if (j !== idx) { const q = loc(o); forbid.set(rectMask(w, h, q, 3).map((v, i) => v | forbid[i])); } });
@@ -700,9 +706,9 @@ function eraseTargets(ctx, W, H, targets, others, opt) {
     const p = Math.round((t.y1 - t.y0) * 0.1) + 3;
     return { ...t, x0: Math.max(0, t.x0 - p), y0: Math.max(0, t.y0 - p), x1: Math.min(W, t.x1 + p), y1: Math.min(H, t.y1 + p) };
   });
-  let count = 0, review = false;
-  list.forEach((t, i) => { const r = eraseOne(ctx, W, H, t, i, list, others, opt); count++; if (r.complex) review = true; });
-  return { count, review };
+  let count = 0, review = false, learned = 0;
+  list.forEach((t, i) => { const r = eraseOne(ctx, W, H, t, i, list, others, opt); if (r.skipped) return; count++; if (t.learned) learned++; if (r.complex) review = true; });
+  return { count, review, learned };
 }
 
 /* ================= OCR ================= */
@@ -728,26 +734,30 @@ function wordsFrom(data, k) {
     text: w.text, conf: w.confidence, x0: w.bbox.x0 / k, y0: w.bbox.y0 / k, x1: w.bbox.x1 / k, y1: w.bbox.y1 / k
   }));
 }
-function variant(src, mode) { // texto oscuro/claro aislado del fondo (blanco y negro)
+function variant(src, mode, thr) { // texto claro/oscuro aislado del fondo (blanco y negro)
   const c = mkCanvas(src.width, src.height), cx = c.getContext('2d', { willReadFrequently: true });
   cx.drawImage(src, 0, 0); const id = cx.getImageData(0, 0, c.width, c.height), p = id.data;
   for (let i = 0; i < p.length; i += 4) {
-    const l = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2], on = mode === 'dark' ? l < 120 : l > 180, v = on ? 0 : 255;
+    const l = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2], on = mode === 'dark' ? l < thr : l > thr, v = on ? 0 : 255;
     p[i] = p[i + 1] = p[i + 2] = v;
   }
   cx.putImageData(id, 0, 0); return c;
 }
+function ocrComplete(words) {
+  const ts = classifyWords(words, { pm: true, price: true });
+  return ts.some(t => t.kind === 'pm') || (ts.some(t => t.kind === 'price' && /^an/i.test(t.text)) && ts.some(t => t.kind === 'price' && /^ah/i.test(t.text)));
+}
+const OCR_PASSES = [['light', 215], ['dark', 95], ['light', 190]];
 async function ocrImage(it, slot) {
   if (window.__mockOCR) return window.__mockOCR(it);
-  const img = await loadImg(it.url), W = img.naturalWidth, H = img.naturalHeight;
+  const img = await loadImg(it.url), W = img.naturalWidth, H = img.naturalHeight; it.w = W; it.h = H;
   const k = clamp(1500 / Math.max(W, H), 0.3, 2.5);
   const c = mkCanvas(Math.round(W * k), Math.round(H * k)); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
   const worker = await ensureOCR(slot);
   let words = wordsFrom((await worker.recognize(c)).data, k);
-  const found = () => classifyWords(words, { pm: true, price: true }).length > 0;
-  for (const mode of ['dark', 'light']) {
-    if (found()) break;
-    words = words.concat(wordsFrom((await worker.recognize(variant(c, mode))).data, k));
+  if (G.ocrMode !== 'fast') for (const [mode, thr] of OCR_PASSES) {
+    if (G.ocrMode === 'balanced' && ocrComplete(words)) break;
+    words = words.concat(wordsFrom((await worker.recognize(variant(c, mode, thr))).data, k));
   }
   return words;
 }
@@ -763,7 +773,7 @@ function pumpOCR() {
     (async () => {
       try { if (it.loadError) throw new Error('No se pudo leer la imagen'); it.words = await ocrImage(it, slot); it.ocrStatus = 'done'; }
       catch (e) { console.warn('OCR', (e && e.message) || e); it.ocrStatus = 'error'; it.words = []; if (/leer la imagen/.test((e && e.message) || '')) it.loadError = true; ocrError(e); }
-      it.ver++; updateTile(it); ocrSummary();
+      it.ver++; if (G.learn) { G.ver++; updateStale(true); } updateTile(it); ocrSummary();
       if (items[refIdx] === it) redrawStage();
       if (items[cur] === it) { updateModalUI(true); mEditor.redraw(); schedulePreview(); }
       ocrActive--; it._res(); pumpOCR();
@@ -775,11 +785,34 @@ function ocrError(e) { lastOcrErr = (e && e.message) || String(e); if (ocrErrSho
 
 /* ================= Render de una foto ================= */
 const eff = it => ({ top: it.top ?? G.top, bottom: it.bottom ?? G.bottom, logo: it.logo || G.logo });
+const iou = (a, b) => { const ix = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)), iy = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0)), i = ix * iy; return i / ((a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - i || 1); };
+let learnCache = null;
+function getLearned() {
+  if (!G.learn || !G.clean.enabled) return [];
+  const done = items.filter(i => i.ocrStatus === 'done' && i.w && i.words && i.words.length);
+  if (done.length < 4) return [];
+  const key = G.ver + '|' + done.length + '|' + items.length + '|' + done.reduce((s, i) => s + i.ver, 0);
+  if (learnCache && learnCache.key === key) return learnCache.z;
+  const cl = [];
+  done.forEach(it => classifyWords(it.words, G.clean).forEach(t => {
+    const r = { x0: t.x0 / it.w, y0: t.y0 / it.h, x1: t.x1 / it.w, y1: t.y1 / it.h };
+    let c = cl.find(c => iou(c.r, r) > 0.35); if (!c) { c = { r: { ...r }, m: [], its: new Set() }; cl.push(c); }
+    c.m.push(r); c.its.add(it.id);
+  }));
+  const med = (a, k) => { const v = a.map(r => r[k]).sort((p, q) => p - q); return v[v.length >> 1]; };
+  const need = Math.max(3, Math.ceil(0.2 * done.length));
+  const z = cl.filter(c => c.its.size >= need).map(c => ({ x0: med(c.m, 'x0'), y0: med(c.m, 'y0'), x1: med(c.m, 'x1'), y1: med(c.m, 'y1') }));
+  learnCache = { key, z }; return z;
+}
 function getTargets(it) {
   const res = [];
   if (G.clean.enabled && it.words) {
     classifyWords(it.words, G.clean).forEach(t => { const key = 'a' + Math.round(t.x0) + '_' + Math.round(t.y0); res.push({ ...t, key, enabled: !it.off.has(key), manual: false }); });
   }
+  if (it.w) getLearned().forEach((z, i) => {
+    const area = (z.x1 - z.x0) * (z.y1 - z.y0), own = res.some(t => !t.manual && ((Math.min(t.x1 / it.w, z.x1) - Math.max(t.x0 / it.w, z.x0)) > 0) && ((Math.min(t.y1 / it.h, z.y1) - Math.max(t.y0 / it.h, z.y0)) > 0) && (Math.max(0, Math.min(t.x1 / it.w, z.x1) - Math.max(t.x0 / it.w, z.x0)) * Math.max(0, Math.min(t.y1 / it.h, z.y1) - Math.max(t.y0 / it.h, z.y0)) / area) > 0.3);
+    if (!own) { const key = 'l' + i; res.push({ x0: z.x0 * it.w, y0: z.y0 * it.h, x1: z.x1 * it.w, y1: z.y1 * it.h, key, kind: 'learned', text: String(i + 1), learned: true, manual: false, enabled: !it.off.has(key), idx: [] }); }
+  });
   if (it.w) G.areas.forEach((a, i) => { const key = 'g' + i; res.push({ x0: a.x0 * it.w, y0: a.y0 * it.h, x1: a.x1 * it.w, y1: a.y1 * it.h, key, kind: 'zone', text: String(i + 1), manual: true, enabled: !it.off.has(key) }); });
   it.manual.forEach((m, i) => res.push({ ...m, key: 'm' + i, kind: 'manual', text: 'Área', manual: true, enabled: true }));
   return res;
@@ -800,8 +833,8 @@ async function renderItem(it, { scale = null } = {}) {
   const sc = t => ({ ...t, x0: t.x0 * s, y0: t.y0 * s, x1: t.x1 * s, y1: t.y1 * s });
   const act = all.map(sc).filter(t => t.y1 > top && t.y0 < ch - bot);
   const others = (it.words || []).filter((_, i) => !used.has(i)).map(w => ({ x0: w.x0 * s, y0: w.y0 * s, x1: w.x1 * s, y1: w.y1 * s }));
-  let count = 0, review = false;
-  if (act.length) { const r = eraseTargets(ctx, cw, ch, act, others, { fallback: G.fallback, logoImg: G.logoImg }); count = r.count; review = r.review; }
+  let count = 0, review = false, learned = 0;
+  if (act.length) { const r = eraseTargets(ctx, cw, ch, act, others, { fallback: G.fallback, logoImg: G.logoImg }); count = r.count; review = r.review; learned = r.learned; }
   const oh = ch - top - bot, o = mkCanvas(cw, oh), ox = o.getContext('2d');
   ox.drawImage(c, 0, top, cw, oh, 0, 0, cw, oh);
   const lg = e.logo;
@@ -809,7 +842,7 @@ async function renderItem(it, { scale = null } = {}) {
     const lw = cw * lg.scale, lh = lw * G.logoImg.naturalHeight / G.logoImg.naturalWidth;
     ox.drawImage(G.logoImg, lg.x * cw, lg.y * oh, lw, lh);
   }
-  return { canvas: o, count, review };
+  return { canvas: o, count, review, learned };
 }
 
 let finalQ = Promise.resolve();
@@ -824,7 +857,7 @@ function finalize(it) {
       if (tc.height > 240) { tc.height = 240; tc.width = Math.max(1, Math.round(240 * r.canvas.width / r.canvas.height)); }
       tc.getContext('2d').drawImage(r.canvas, 0, 0, tc.width, tc.height);
       it.thumbUrl = tc.toDataURL('image/jpeg', 0.8);
-      it.result = { blob, stamp: st, count: r.count, review: r.review, name: it.name.replace(/\.[^/.]+$/, '') + '_editada.jpg' };
+      it.result = { blob, stamp: st, count: r.count, review: r.review, learned: r.learned, name: it.name.replace(/\.[^/.]+$/, '') + '_editada.jpg' };
     } catch (e) { console.error(e); it.result = null; }
     updateTile(it);
   }));
@@ -876,8 +909,8 @@ class Editor {
     for (const t of this.ad.targets()) {
       const x = t.x0 * d2, y = t.y0 * d2, w = (t.x1 - t.x0) * d2, h = (t.y1 - t.y0) * d2;
       ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = !t.enabled ? '#9a9a9a' : t.manual ? '#e08a00' : '#e5484d';
-      ctx.fillStyle = !t.enabled ? 'rgba(150,150,150,.12)' : t.manual ? 'rgba(224,138,0,.18)' : 'rgba(229,72,77,.15)';
+      ctx.strokeStyle = !t.enabled ? '#9a9a9a' : t.learned ? '#2f6fed' : t.manual ? '#e08a00' : '#e5484d';
+      ctx.fillStyle = !t.enabled ? 'rgba(150,150,150,.12)' : t.learned ? 'rgba(47,111,237,.15)' : t.manual ? 'rgba(224,138,0,.18)' : 'rgba(229,72,77,.15)';
       ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
     }
     ctx.setLineDash([]);
@@ -1017,7 +1050,7 @@ function badgeFor(it) {
   if (!it.result) return ['', it.custom ? '✎ Editada' : 'Pendiente'];
   if (it.result.stamp !== stamp(it)) return ['', 'Desactualizada'];
   if (it.result.review) return ['warn', '⚠ Revisar fondo'];
-  if (it.result.count) return ['ok', '✓ ' + it.result.count + (it.result.count > 1 ? ' limpiados' : ' limpiado') + (it.custom ? ' · ✎' : '')];
+  if (it.result.count) return ['ok', '✓ ' + it.result.count + (it.result.count > 1 ? ' limpiados' : ' limpiado') + (it.result.learned ? ' · ' + it.result.learned + ' por posición' : '') + (it.custom ? ' · ✎' : '')];
   if (G.clean.enabled && it.ocrStatus === 'error') return ['warn', '⚠ Sin lector'];
   return ['', G.clean.enabled ? 'Sin texto que borrar' : (it.custom ? '✎ Editada' : 'Lista')];
 }
@@ -1098,17 +1131,19 @@ function syncClean() {
   $('#cleanOn').checked = G.clean.enabled; $('#cleanBody').style.opacity = G.clean.enabled ? 1 : .45; $('#cleanBody').style.pointerEvents = G.clean.enabled ? '' : 'none';
   [['sPm', 'pm'], ['sPrice', 'price'], ['sDate', 'date'], ['sCode', 'code']].forEach(([id, k]) => $('#' + id).checked = G.clean[k]);
   $('#cPm').checked = G.clean.pm; $('#cPrice').checked = G.clean.price; $('#cDate').checked = G.clean.date; $('#cCode').checked = G.clean.code; $('#cExtra').value = G.clean.extra;
+  $('#learnOn').checked = G.learn; $('#ocrMode').value = G.ocrMode;
   $('#fallback').value = G.fallback; $('#maxDim').value = String(G.maxDim);
 }
 function onCleanChange() {
   G.clean.enabled = $('#cleanOn').checked; G.clean.pm = $('#cPm').checked; G.clean.price = $('#cPrice').checked; G.clean.date = $('#cDate').checked; G.clean.code = $('#cCode').checked; G.clean.extra = $('#cExtra').value;
+  G.learn = $('#learnOn').checked; G.ocrMode = $('#ocrMode').value;
   G.fallback = $('#fallback').value; G.maxDim = +$('#maxDim').value;
   syncClean(); ocrSummary();
   if (G.clean.enabled) items.forEach(it => { if (it.ocrStatus === 'skip') { it.ocrStatus = 'pending'; } if (!it.ocrP) runOCR(it); });
   bump();
 }
 [['sPm', 'cPm'], ['sPrice', 'cPrice'], ['sDate', 'cDate'], ['sCode', 'cCode']].forEach(([s, c]) => $('#' + s).addEventListener('change', e => { $('#' + c).checked = e.target.checked; onCleanChange(); }));
-['#cleanOn', '#cPm', '#cPrice', '#cDate', '#cCode', '#fallback', '#maxDim'].forEach(s => $(s).addEventListener('change', onCleanChange));
+['#cleanOn', '#cPm', '#cPrice', '#cDate', '#cCode', '#fallback', '#maxDim', '#learnOn', '#ocrMode'].forEach(s => $(s).addEventListener('change', onCleanChange));
 $('#cExtra').addEventListener('input', onCleanChange);
 
 /* Logo */
@@ -1149,13 +1184,19 @@ document.addEventListener('click', e => {
 /* Procesar / Descargar */
 let busy = false;
 function progress(i, n, msg) { $('#progWrap').hidden = false; $('#prog').style.width = (100 * i / n) + '%'; $('#statusText').textContent = msg; }
+async function allOCR() {
+  if (!G.clean.enabled) return;
+  const ps = items.map(it => runOCR(it)); let d = 0;
+  ps.forEach(pr => pr.then(() => { d++; progress(d, items.length, 'Leyendo texto ' + d + ' de ' + items.length + '…'); }));
+  await Promise.all(ps);
+}
 async function processAll() {
   if (busy || !items.length) return; busy = true; $('#processBtn').disabled = true;
   try {
+    await allOCR();
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      progress(i, items.length, G.clean.enabled && it.ocrStatus !== 'done' ? 'Leyendo texto ' + (i + 1) + ' de ' + items.length + '…' : 'Procesando ' + (i + 1) + ' de ' + items.length + '…');
-      if (G.clean.enabled && it.ocrStatus !== 'done') await runOCR(it);
+      progress(i, items.length, 'Procesando ' + (i + 1) + ' de ' + items.length + '…');
       await finalize(it);
     }
   } finally { busy = false; $('#progWrap').hidden = true; $('#processBtn').disabled = false; updateStale(); updateSummary(); }
@@ -1169,9 +1210,9 @@ function saveBlob(blob, name) { const a = document.createElement('a'); a.href = 
 async function ensureFresh() {
   busy = true;
   try {
+    await allOCR();
     for (let i = 0; i < items.length; i++) {
       const it = items[i]; progress(i, items.length, 'Preparando ' + (i + 1) + ' de ' + items.length + '…');
-      if (G.clean.enabled && it.ocrStatus !== 'done') await runOCR(it);
       await finalize(it);
     }
   } finally { busy = false; $('#progWrap').hidden = true; updateStale(); updateSummary(); }
@@ -1203,7 +1244,7 @@ $('#shareBtn').addEventListener('click', async () => {
 
 /* ================= Modal de revisión ================= */
 const modal = $('#modal'); let cur = -1, pvTimer = null, pvTok = 0;
-const KINDS = { pm: 'PM', price: 'Precio', date: 'Fecha', code: 'Código', extra: 'Palabra', manual: 'Área', zone: 'Zona' };
+const KINDS = { pm: 'PM', price: 'Precio', date: 'Fecha', code: 'Código', extra: 'Palabra', manual: 'Área', zone: 'Zona', learned: 'Por posición' };
 function openModal(i) {
   if (i < 0 || i >= items.length) return; cur = i; modal.hidden = false; document.body.classList.add('noscroll'); loadModalItem(); $('#mNext').focus({ preventScroll: true });
 }
