@@ -192,7 +192,7 @@ dialog li{margin:6px 0}
           <select id="ocrMode"><option value="fast">Rápida (1 pasada)</option><option value="balanced">Equilibrada (recomendada)</option><option value="full">Exhaustiva (más lenta)</option></select></label>
         <label class="field"><span>Otras palabras a borrar <small style="font-weight:400;color:var(--muted)">(separadas por coma)</small></span>
           <input type="text" id="cExtra" placeholder="Ej: mayorista, oferta" autocomplete="off"></label>
-        <label class="field"><span>Si el fondo es muy complicado</span>
+        <label class="field" hidden><span>Si el fondo es muy complicado</span>
           <select id="fallback">
             <option value="logo">Tapar con el logo y marcar para revisar</option>
             <option value="blur">Relleno suave (difuminado) y marcar</option>
@@ -360,7 +360,7 @@ const G = {
   clean: Object.assign({ enabled: true, pm: true, price: true, date: false, code: false, extra: '' }, saved.clean || {}),
   areas: saved.areas || [],
   learn: saved.learn !== false, ocrMode: saved.ocrMode || 'balanced',
-  fallback: saved.fallback || 'logo',
+  fallback: 'keep',
   maxDim: saved.maxDim || 0,
   ver: 0, logoImg: null
 };
